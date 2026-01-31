@@ -7,78 +7,36 @@
 
   <style>
     :root { color-scheme: dark; }
-    body {
-      margin: 0;
-      background: #0b0d10;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
-    }
-
-    #wrap {
-      display: grid;
-      grid-template-rows: auto 1fr;
-      height: 100vh;
-    }
-
+    body { margin: 0; background: #0b0d10; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #wrap { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
     #ui {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
+      display: flex; flex-wrap: wrap; gap: 10px;
       align-items: center;
       padding: 10px 12px;
       background: rgba(20,23,28,.95);
       border-bottom: 1px solid rgba(255,255,255,.08);
       user-select: none;
     }
-
     button {
-      background: #1c2330;
-      color: #e7edf7;
+      background: #1c2330; color: #e7edf7;
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 10px;
       padding: 8px 10px;
       cursor: pointer;
     }
-
     button:hover { background: #242d3d; }
-
-    label {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      color: #cbd5e1;
-    }
-
+    label { display: inline-flex; align-items: center; gap: 8px; color: #cbd5e1; }
     input[type="range"] { width: 220px; }
-
     #hud {
       margin-left: auto;
       color: #aab4c4;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
-
-    canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
-      touch-action: none;
-    }
-
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
     .hint { color:#93a4bf; opacity:.9; }
-    .pill {
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: rgba(255,255,255,.06);
-      border:1px solid rgba(255,255,255,.08);
-    }
-
-    kbd {
-      padding: 2px 6px;
-      border: 1px solid rgba(255,255,255,.18);
-      border-bottom-width: 2px;
-      border-radius: 6px;
-      background: rgba(255,255,255,.06);
-    }
+    .pill { padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); }
+    kbd { padding: 2px 6px; border: 1px solid rgba(255,255,255,.18); border-bottom-width: 2px; border-radius: 6px; background: rgba(255,255,255,.06); }
   </style>
 </head>
 
@@ -102,8 +60,9 @@
     </label>
 
     <span class="hint">
-      Drag = pan • Shift+drag = box zoom • Click = zoom • Shift+click = out •
-      Wheel = zoom • Space = HQ • R = reset • ↑/↓ zoom • ←/→ pan
+      Drag = pan • Shift+drag = box zoom • Click = zoom • Shift+click = out • Wheel = zoom •
+      <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> pan • <kbd>Shift</kbd>+<kbd>↑</kbd> zoom in • <kbd>Shift</kbd>+<kbd>↓</kbd> zoom out •
+      <kbd>Space</kbd> HQ • <kbd>R</kbd> reset
     </span>
 
     <div id="hud"></div>
@@ -136,7 +95,7 @@ const PREVIEW_QUALITY = 0.45;
 const PREVIEW_ITER_MULT = 0.25;
 const SETTLE_MS = 220;
 
-// Progressive render chunk size (fixed, not exposed)
+// Progressive render chunk size (fixed)
 const ROWS_PER_FRAME = 14;
 
 let lastPreview = 0;
@@ -165,8 +124,7 @@ function resize() {
 
 function updateHUD(iter = state.maxIter) {
   const f = v => Math.abs(v) < 1e-3 ? v.toExponential(3) : v.toFixed(6);
-  hud.textContent =
-    `cx ${f(state.cx)}  cy ${f(state.cy)}  scale ${state.scale.toExponential(3)}  iter ${iter}`;
+  hud.textContent = `cx ${f(state.cx)}  cy ${f(state.cy)}  scale ${state.scale.toExponential(3)}  iter ${iter}`;
 }
 
 function pixelToComplex(px, py) {
@@ -182,24 +140,20 @@ function pixelToComplex(px, py) {
 }
 
 function isInside(cx, cy) {
-  // main cardioid
-  const x = cx - 0.25;
-  const y = cy;
+  const x = cx - 0.25, y = cy;
   const q = x*x + y*y;
   if (q*(q + x) <= 0.25*y*y) return true;
-
-  // period-2 bulb
   const x2 = cx + 1.0;
   if (x2*x2 + cy*cy <= 0.0625) return true;
-
   return false;
 }
 
 function color(t) {
   const a = 0.5, b = 0.5;
-  const r = a + b * Math.cos(6.283185307179586 * (t));
-  const g = a + b * Math.cos(6.283185307179586 * (t + 0.33));
-  const b2 = a + b * Math.cos(6.283185307179586 * (t + 0.67));
+  const TAU = 6.283185307179586;
+  const r = a + b * Math.cos(TAU * (t));
+  const g = a + b * Math.cos(TAU * (t + 0.33));
+  const b2 = a + b * Math.cos(TAU * (t + 0.67));
   return [ (r*255)|0, (g*255)|0, (b2*255)|0, 255 ];
 }
 
@@ -210,7 +164,6 @@ function renderProgressive(maxIter) {
   const token = ++renderToken;
 
   const w = canvas.width, h = canvas.height;
-
   const img = ctx.createImageData(w, h);
   const d = img.data;
 
@@ -226,7 +179,7 @@ function renderProgressive(maxIter) {
   let py = 0;
 
   function step() {
-    if (token !== renderToken) return; // canceled
+    if (token !== renderToken) return;
 
     const yEnd = Math.min(h, py + ROWS_PER_FRAME);
 
@@ -251,7 +204,6 @@ function renderProgressive(maxIter) {
 
           if (zx*zx + zy*zy > 4) break;
 
-          // periodicity check
           if ((i & 31) === 0) {
             if (Math.abs(zx - ox) < 1e-12 && Math.abs(zy - oy) < 1e-12) {
               i = maxIter; break;
@@ -272,23 +224,16 @@ function renderProgressive(maxIter) {
       }
     }
 
-    // Paint partial progress
     ctx.putImageData(img, 0, 0);
 
-    if (py < h) {
-      requestAnimationFrame(step);
-    } else {
-      updateHUD(maxIter);
-    }
+    if (py < h) requestAnimationFrame(step);
+    else updateHUD(maxIter);
   }
 
   requestAnimationFrame(step);
 }
 
-// Convenience: cancel any current render immediately
-function cancelRender() {
-  renderToken++;
-}
+function cancelRender() { renderToken++; }
 
 // ---------------------------
 // Render modes
@@ -318,7 +263,6 @@ function renderPreviewThrottled() {
   settleTimer = setTimeout(renderHQ, SETTLE_MS);
 }
 
-// Zoom toward a screen point
 function zoomAt(px, py, factor) {
   const before = pixelToComplex(px, py);
   state.scale *= factor;
@@ -366,7 +310,6 @@ window.addEventListener("mouseup", () => {
   if (!dragging) return;
   dragging = false;
 
-  // Box zoom on mouse up
   if (box && boxStart) {
     const x1 = boxStart.x, y1 = boxStart.y;
     const x2 = last.x,     y2 = last.y;
@@ -388,9 +331,7 @@ window.addEventListener("mouseup", () => {
     const scaleX = state.scale * (selW / w);
     const viewH = state.scale / aspect;
     const scaleY = viewH * (selH / h);
-    const newViewW = Math.max(scaleX, scaleY * aspect);
-
-    state.scale = newViewW;
+    state.scale = Math.max(scaleX, scaleY * aspect);
   }
 
   box = false;
@@ -402,139 +343,4 @@ window.addEventListener("mouseup", () => {
 canvas.addEventListener("click", (e) => {
   if (dragging) return;
 
-  const px = e.offsetX * (canvas.width / canvas.clientWidth);
-  const py = e.offsetY * (canvas.height / canvas.clientHeight);
-  const factor = e.shiftKey ? 1.8 : 0.55;
-
-  zoomAt(px, py, factor);
-  renderPreviewThrottled();
-});
-
-canvas.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const px = e.offsetX * (canvas.width / canvas.clientWidth);
-  const py = e.offsetY * (canvas.height / canvas.clientHeight);
-
-  const dy = Math.max(-120, Math.min(120, e.deltaY));
-  const zoomFactor = Math.exp(dy * 0.0016);
-
-  zoomAt(px, py, zoomFactor);
-  renderPreviewThrottled();
-}, { passive: false });
-
-// ---------------------------
-// Keyboard controls (accelerated ↓ zoom-out)
-// ---------------------------
-const keys = { up:false, down:false, left:false, right:false };
-let downHold = 0;
-
-window.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowUp")    keys.up = true;
-  if (e.key === "ArrowDown")  keys.down = true;
-  if (e.key === "ArrowLeft")  keys.left = true;
-  if (e.key === "ArrowRight") keys.right = true;
-
-  if (e.key.toLowerCase() === "r") {
-    resetView();
-    renderHQ();
-  }
-
-  if (e.key === " ") {
-    e.preventDefault();
-    renderHQ();
-  }
-});
-
-window.addEventListener("keyup", (e) => {
-  if (e.key === "ArrowUp")    keys.up = false;
-  if (e.key === "ArrowDown")  { keys.down = false; downHold = 0; }
-  if (e.key === "ArrowLeft")  keys.left = false;
-  if (e.key === "ArrowRight") keys.right = false;
-
-  clearTimeout(settleTimer);
-  settleTimer = setTimeout(renderHQ, SETTLE_MS);
-});
-
-function controlLoop() {
-  let moved = false;
-
-  if (keys.up) {
-    state.scale *= 0.985;
-    moved = true;
-  }
-
-  if (keys.down) {
-    downHold = Math.min(downHold + 1, 120);
-    const accel = 1 + downHold * 0.003;
-    state.scale *= (1.015 * accel);
-    moved = true;
-  }
-
-  const panSpeed = state.scale * 0.02;
-  if (keys.left)  { state.cx -= panSpeed; moved = true; }
-  if (keys.right) { state.cx += panSpeed; moved = true; }
-
-  if (moved) renderPreviewThrottled();
-
-  requestAnimationFrame(controlLoop);
-}
-
-// ---------------------------
-// UI wiring
-// ---------------------------
-function resetView() {
-  state.cx = -0.5;
-  state.cy = 0.0;
-  state.scale = 3.0;
-}
-
-iterEl.oninput = () => {
-  iterValEl.textContent = iterEl.value;
-  state.maxIter = +iterEl.value;
-  updateHUD(state.maxIter);
-};
-iterEl.onchange = renderHQ;
-
-qEl.oninput = () => {
-  qValEl.textContent = (+qEl.value).toFixed(1);
-};
-qEl.onchange = renderHQ;
-
-renderBtn.onclick = renderHQ;
-
-resetBtn.onclick = () => {
-  resetView();
-  iterEl.value = 350; iterValEl.textContent = "350";
-  qEl.value = 0.7; qValEl.textContent = "0.7";
-  downHold = 0;
-  renderHQ();
-};
-
-copyBtn.onclick = async () => {
-  const s = `cx=${state.cx}&cy=${state.cy}&scale=${state.scale}&iter=${iterEl.value}&q=${qEl.value}`;
-  try {
-    await navigator.clipboard.writeText(s);
-    hud.textContent = "Copied ✔";
-    setTimeout(() => updateHUD(), 700);
-  } catch {
-    prompt("Copy:", s);
-  }
-};
-
-window.addEventListener("resize", () => {
-  state.quality = +qEl.value;
-  resize();
-  renderHQ();
-});
-
-// Boot
-iterValEl.textContent = iterEl.value;
-qValEl.textContent = (+qEl.value).toFixed(1);
-resize();
-renderHQ();
-controlLoop();
-
-})();
-</script>
-</body>
-</html>
+  const px = e.offsetX * (canvas.width /*
