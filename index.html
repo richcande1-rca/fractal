@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mandelbrot Explorer</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; background: #0b0d10; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #wrap { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+    #ui {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      background: rgba(20, 23, 28, 0.95);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      user-select: none;
+    }
+    button {
+      background: #1c2330; color: #e7edf7;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    button:hover { background: #242d3d; }
+    label { display: inline-flex; align-items: center; gap: 8px; color: #cbd5e1; }
+    input[type="range"] { width: 220px; }
+    #hud {
+      margin-left: auto;
+      color: #aab4c4;
+      opacity: 0.95;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    .hint { color:#93a4bf; opacity:0.9; }
+    .pill { padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.08); }
+    kbd { padding: 2px 6px; border: 1px solid rgba(255,255,255,0.18); border-bottom-width: 2px; border-radius: 6px; background: rgba(255,255,255,0.06); }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="ui">
+    <button id="renderBtn">Render</button>
+    <button id="resetBtn">Reset</button>
+
+    <label class="pill">
+      Iterations
+      <input id="iter" type="range" min="50" max="2000" value="600" step="10" />
+      <span id="iterVal">600</span>
+    </label>
+
+    <label class="pill">
+      Quality
+      <input id="quality" type="range" min="0.5" max="1.5" value="1.0" step="0.1" />
+      <span id="qualityVal">1.0</span>
+    </label>
+
+    <span class="hint">
+      Drag = pan • Two-finger scroll = zoom • Tap/click = zoom in • <kbd>Shift</kbd>+tap = zoom out •
+      <kbd>+</kbd>/<kbd>-</kbd> zoom • arrows pan • <kbd>R</kbd> reset
+    </span>
+
+    <div id="hud"></div>
+  </div>
+
+  <canvas id="c"></canvas>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  const iterEl = document.getElementById("iter");
+  const iterValEl = document.getElementById("iterVal");
+  const qEl = document.getElementById("quality");
+  const qValEl = document.getElementById("qualityVal");
+  const hud = document.getElementById("hud");
+  const renderBtn = document.getElementById("renderBtn");
+  const resetBtn  = document.getElementById("resetBtn");
+
+  const state = {
+    cx: -0.5,
+    cy: 0.0,
+    scale: 3.0,
+    maxIter: +iterEl.value,
+    quality: +qEl.value
+  };
+
+  // Pan/drag
+  let dragging = false;
+  let last = { x: 0, y: 0 };
+
+  // Debounced render
+  let renderQueued = false;
+  function queueRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => {
+      renderQueued = false;
+      render();
+    });
+  }
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const q = state.quality;
+    const w = Math.floor(canvas.clientWidth  * dpr * q);
+    const h = Math.floor(canvas.clientHeight * dpr * q);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      queueRender();
+    }
+  }
+  window.addEventListener("resize", resize);
+
+  function updateHUD() {
+    const digits = (v) => (Math.abs(v) < 1e-3 ? v.toExponential(3) : v.toFixed(6));
+    hud.textContent =
+      `cx ${digits(state.cx)}  cy ${digits(state.cy)}  scale ${state.scale.toExponential(3)}  iter ${state.maxIter}`;
+  }
+
+  // Screen pixel -> complex plane
+  function pixelToComplex(px, py) {
+    const w = canvas.width, h = canvas.height;
+    const aspect = w / h;
+    const viewW = state.scale;
+    const viewH = state.scale / aspect;
+    const x = state.cx + (px / w - 0.5) * viewW;
+    const y = state.cy + (py / h - 0.5) * viewH;
+    return { x, y };
+  }
+
+  function smoothIter(i, zx, zy) {
+    const mag = Math.sqrt(zx*zx + zy*zy);
+    return i + 1 - Math.log(Math.log(mag)) / Math.LN2;
+  }
+
+  function colorFromT(t) {
+    const a = 0.5, b = 0.5;
+    const d1 = 0.00, d2 = 0.33, d3 = 0.67;
+    const r = a + b * Math.cos(2*Math.PI*(t + d1));
+    const g = a + b * Math.cos(2*Math.PI*(t + d2));
+    const bb = a + b * Math.cos(2*Math.PI*(t + d3));
+    return [ (r*255)|0, (g*255)|0, (bb*255)|0, 255 ];
+  }
+
+  function render() {
+    state.maxIter = +iterEl.value;
+
+    const w = canvas.width, h = canvas.height;
+    const img = ctx.createImageData(w, h);
+    const data = img.data;
+
+    const aspect = w / h;
+    const viewW = state.scale;
+    const viewH = state.scale / aspect;
+
+    const x0 = state.cx - viewW / 2;
+    const y0 = state.cy - viewH / 2;
+    const dx = viewW / w;
+    const dy = viewH / h;
+
+    const maxIter = state.maxIter;
+
+    let p = 0;
+    for (let py = 0; py < h; py++) {
+      const cy = y0 + py * dy;
+      for (let px = 0; px < w; px++) {
+        const cx = x0 + px * dx;
+
+        let zx = 0, zy = 0, i = 0;
+        while (i < maxIter) {
+          const zx2 = zx*zx - zy*zy + cx;
+          const zy2 = 2*zx*zy + cy;
+          zx = zx2; zy = zy2;
+          if (zx*zx + zy*zy > 4) break;
+          i++;
+        }
+
+        if (i === maxIter) {
+          data[p++] = 5; data[p++] = 6; data[p++] = 8; data[p++] = 255;
+        } else {
+          const mu = smoothIter(i, zx, zy);
+          const t = (mu / maxIter) * 1.25;
+          const col = colorFromT(t);
+          data[p++] = col[0]; data[p++] = col[1]; data[p++] = col[2]; data[p++] = 255;
+        }
+      }
+    }
+
+    ctx.putImageData(img, 0, 0);
+    updateHUD();
+  }
+
+  // Zoom helper (zoom toward a screen point)
+  function zoomAt(px, py, factor) {
+    const before = pixelToComplex(px, py);
+    state.scale *= factor;
+    const after = pixelToComplex(px, py);
+    // Adjust center so the point under cursor stays fixed
+    state.cx += (before.x - after.x);
+    state.cy += (before.y - after.y);
+    queueRender();
+  }
+
+  // Pan helper (delta in pixels)
+  function panByPixels(dxPx, dyPx) {
+    const w = canvas.width, h = canvas.height;
+    const aspect = w / h;
+    const viewW = state.scale;
+    const viewH = state.scale / aspect;
+    state.cx -= dxPx * (viewW / w);
+    state.cy -= dyPx * (viewH / h);
+    queueRender();
+  }
+
+  // ---- Touchpad / Mouse events ----
+  canvas.addEventListener("mousedown", (e) => {
+    dragging = true;
+    last.x = e.offsetX * (canvas.width / canvas.clientWidth);
+    last.y = e.offsetY * (canvas.height / canvas.clientHeight);
+  });
+
+  window.addEventListener("mouseup", () => dragging = false);
+
+  canvas.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const x = e.offsetX * (canvas.width / canvas.clientWidth);
+    const y = e.offsetY * (canvas.height / canvas.clientHeight);
+    const dx = x - last.x;
+    const dy = y - last.y;
+    last.x = x; last.y = y;
+    panByPixels(dx, dy);
+  });
+
+  // Click/tap zoom
+  canvas.addEventListener("click", (e) => {
+    // If you were dragging, don't also zoom
+    if (dragging) return;
+    const px = e.offsetX * (canvas.width / canvas.clientWidth);
+    const py = e.offsetY * (canvas.height / canvas.clientHeight);
+    const factor = e.shiftKey ? 1.8 : 0.55; // out vs in
+    zoomAt(px, py, factor);
+  });
+
+  // Two-finger scroll usually arrives as wheel events on Chromebooks
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const px = e.offsetX * (canvas.width / canvas.clientWidth);
+    const py = e.offsetY * (canvas.height / canvas.clientHeight);
+    // Trackpad gives small deltas; map to a smooth exponential zoom
+    const zoom = Math.exp(e.deltaY * 0.0015);
+    zoomAt(px, py, zoom);
+  }, { passive: false });
+
+  // ---- Keyboard controls ----
+  window.addEventListener("keydown", (e) => {
+    const step = 60; // pixels per keypress pan
+    if (e.key === "ArrowLeft")  panByPixels(-step, 0);
+    if (e.key === "ArrowRight") panByPixels(step, 0);
+    if (e.key === "ArrowUp")    panByPixels(0, -step);
+    if (e.key === "ArrowDown")  panByPixels(0, step);
+
+    if (e.key === "+" || e.key === "=") zoomAt(canvas.width/2, canvas.height/2, 0.75);
+    if (e.key === "-" || e.key === "_") zoomAt(canvas.width/2, canvas.height/2, 1.33);
+
+    if (e.key.toLowerCase() === "r") {
+      state.cx = -0.5; state.cy = 0; state.scale = 3.0;
+      queueRender();
+    }
+    if (e.key === " ") {
+      e.preventDefault();
+      render();
+    }
+  });
+
+  // UI wiring
+  iterEl.addEventListener("input", () => iterValEl.textContent = iterEl.value);
+  iterEl.addEventListener("change", queueRender);
+
+  qEl.addEventListener("input", () => {
+    qValEl.textContent = (+qEl.value).toFixed(1);
+    state.quality = +qEl.value;
+    resize();
+  });
+
+  renderBtn.addEventListener("click", render);
+
+  resetBtn.addEventListener("click", () => {
+    state.cx = -0.5; state.cy = 0; state.scale = 3.0;
+    iterEl.value = 600; iterValEl.textContent = "600";
+    qEl.value = 1.0; qValEl.textContent = "1.0";
+    state.maxIter = 600; state.quality = 1.0;
+    resize();
+    render();
+  });
+
+  // boot
+  iterValEl.textContent = iterEl.value;
+  qValEl.textContent = (+qEl.value).toFixed(1);
+  resize();
+  render();
+})();
+</script>
+</body>
+</html>
