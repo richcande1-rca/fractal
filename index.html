@@ -103,7 +103,7 @@
 
     <span class="hint">
       Drag = pan • Shift+drag = box zoom • Click = zoom • Shift+click = out •
-      Wheel = zoom • Space = HQ • R = reset
+      Wheel = zoom • Space = HQ • R = reset • ↑/↓ zoom • ←/→ pan
     </span>
 
     <div id="hud"></div>
@@ -222,6 +222,7 @@ function renderWith(maxIter) {
 
         if(zx*zx+zy*zy>4) break;
 
+        // periodicity check (cheap "inside" detection)
         if((i&31)===0){
           if(Math.abs(zx-ox)<1e-12 && Math.abs(zy-oy)<1e-12){
             i=maxIter; break;
@@ -258,7 +259,7 @@ function preview(){
 
   state.quality=PREVIEW_QUALITY;
   resize();
-  renderWith(Math.max(50, iterEl.value*PREVIEW_ITER_MULT|0));
+  renderWith(Math.max(50, (iterEl.value*PREVIEW_ITER_MULT)|0));
 
   clearTimeout(settleTimer);
   settleTimer=setTimeout(renderHQ,SETTLE_MS);
@@ -302,7 +303,52 @@ canvas.addEventListener("mousemove",e=>{
 
 window.addEventListener("mouseup",()=>{
   dragging=false;
+
+  // If we were box-zooming, zoom to the rectangle on mouse up
+  if (box && boxStart) {
+    const x1 = boxStart.x, y1 = boxStart.y;
+    const x2 = last.x,     y2 = last.y;
+
+    const xMin = Math.min(x1, x2), xMax = Math.max(x1, x2);
+    const yMin = Math.min(y1, y2), yMax = Math.max(y1, y2);
+
+    const selW = Math.max(2, xMax - xMin);
+    const selH = Math.max(2, yMax - yMin);
+
+    // center selection
+    const cA = pixelToComplex(xMin, yMin);
+    const cB = pixelToComplex(xMax, yMax);
+    state.cx = (cA.x + cB.x) / 2;
+    state.cy = (cA.y + cB.y) / 2;
+
+    // fit selection, preserve aspect
+    const w = canvas.width, h = canvas.height;
+    const aspect = w / h;
+
+    const scaleX = state.scale * (selW / w);
+    const viewH = state.scale / aspect;
+    const scaleY = viewH * (selH / h);
+    const newViewW = Math.max(scaleX, scaleY * aspect);
+
+    state.scale = newViewW;
+  }
+
+  box=false;
+  boxStart=null;
+
   renderHQ();
+});
+
+canvas.addEventListener("click", (e) => {
+  // Ignore click that ends a drag gesture
+  if (dragging) return;
+
+  const px = e.offsetX * (canvas.width / canvas.clientWidth);
+  const py = e.offsetY * (canvas.height / canvas.clientHeight);
+  const factor = e.shiftKey ? 1.8 : 0.55;
+
+  zoomAt(px, py, factor);
+  preview();
 });
 
 canvas.addEventListener("wheel",e=>{
@@ -314,18 +360,90 @@ canvas.addEventListener("wheel",e=>{
   preview();
 },{passive:false});
 
-iterEl.oninput=()=>{iterValEl.textContent=iterEl.value; state.maxIter=+iterEl.value;};
+// -------- Keyboard controls (with accelerated ↓ zoom-out) --------
+const keys = { up:false, down:false, left:false, right:false };
+let downHold = 0; // frames held for ArrowDown acceleration
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowUp")    keys.up = true;
+  if (e.key === "ArrowDown")  keys.down = true;
+  if (e.key === "ArrowLeft")  keys.left = true;
+  if (e.key === "ArrowRight") keys.right = true;
+
+  if (e.key.toLowerCase() === "r") {
+    resetView();
+    renderHQ();
+  }
+
+  if (e.key === " ") {
+    e.preventDefault();
+    renderHQ();
+  }
+});
+
+window.addEventListener("keyup", (e) => {
+  if (e.key === "ArrowUp")    keys.up = false;
+  if (e.key === "ArrowDown")  { keys.down = false; downHold = 0; } // reset accel
+  if (e.key === "ArrowLeft")  keys.left = false;
+  if (e.key === "ArrowRight") keys.right = false;
+
+  clearTimeout(settleTimer);
+  settleTimer=setTimeout(renderHQ,SETTLE_MS);
+});
+
+function controlLoop() {
+  let moved = false;
+
+  // Zoom IN (steady)
+  if (keys.up) {
+    state.scale *= 0.985;
+    moved = true;
+  }
+
+  // Zoom OUT (accelerates while holding down)
+  if (keys.down) {
+    downHold = Math.min(downHold + 1, 120);     // cap so it doesn't go insane
+    const accel = 1 + downHold * 0.003;         // ramps up over time
+    state.scale *= (1.015 * accel);
+    moved = true;
+  }
+
+  // Pan
+  const panSpeed = state.scale * 0.02;
+  if (keys.left)  { state.cx -= panSpeed; moved = true; }
+  if (keys.right) { state.cx += panSpeed; moved = true; }
+
+  if (moved) preview();
+
+  requestAnimationFrame(controlLoop);
+}
+
+// -------- UI wiring --------
+function resetView() {
+  state.cx = -0.5;
+  state.cy = 0.0;
+  state.scale = 3.0;
+}
+
+iterEl.oninput=()=>{
+  iterValEl.textContent=iterEl.value;
+  state.maxIter = +iterEl.value;
+  updateHUD(state.maxIter);
+};
 iterEl.onchange=renderHQ;
 
-qEl.oninput=()=>{qValEl.textContent=(+qEl.value).toFixed(1);};
+qEl.oninput=()=>{
+  qValEl.textContent=(+qEl.value).toFixed(1);
+};
 qEl.onchange=renderHQ;
 
 renderBtn.onclick=renderHQ;
 
 resetBtn.onclick=()=>{
-  state.cx=-.5; state.cy=0; state.scale=3;
+  resetView();
   iterEl.value=350; iterValEl.textContent="350";
-  qEl.value=.7; qValEl.textContent="0.7";
+  qEl.value=0.7; qValEl.textContent="0.7";
+  downHold = 0;
   renderHQ();
 };
 
@@ -340,8 +458,18 @@ copyBtn.onclick=async()=>{
   }
 };
 
+window.addEventListener("resize", () => {
+  state.quality = +qEl.value;
+  resize();
+  renderHQ();
+});
+
+// Boot
+iterValEl.textContent = iterEl.value;
+qValEl.textContent = (+qEl.value).toFixed(1);
 resize();
 renderHQ();
+controlLoop();
 
 })();
 </script>
