@@ -257,26 +257,60 @@
     zoomAt(px, py, zoom);
   }, { passive: false });
 
-  // ---- Keyboard controls ----
-  window.addEventListener("keydown", (e) => {
-    const step = 60; // pixels per keypress pan
-    if (e.key === "ArrowLeft")  panByPixels(-step, 0);
-    if (e.key === "ArrowRight") panByPixels(step, 0);
-    if (e.key === "ArrowUp")    panByPixels(0, -step);
-    if (e.key === "ArrowDown")  panByPixels(0, step);
+// ---- Keyboard controls (smooth) ----
+const keys = {
+  up: false,
+  down: false,
+  left: false,
+  right: false
+};
 
-    if (e.key === "+" || e.key === "=") zoomAt(canvas.width/2, canvas.height/2, 0.75);
-    if (e.key === "-" || e.key === "_") zoomAt(canvas.width/2, canvas.height/2, 1.33);
+window.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowUp")    keys.up = true;
+  if (e.key === "ArrowDown")  keys.down = true;
+  if (e.key === "ArrowLeft")  keys.left = true;
+  if (e.key === "ArrowRight") keys.right = true;
 
-    if (e.key.toLowerCase() === "r") {
-      state.cx = -0.5; state.cy = 0; state.scale = 3.0;
-      queueRender();
-    }
-    if (e.key === " ") {
-      e.preventDefault();
-      render();
-    }
-  });
+  if (e.key.toLowerCase() === "r") {
+    state.cx = -0.5;
+    state.cy = 0;
+    state.scale = 3.0;
+    queueRender();
+  }
+});
+
+window.addEventListener("keyup", (e) => {
+  if (e.key === "ArrowUp")    keys.up = false;
+  if (e.key === "ArrowDown")  keys.down = false;
+  if (e.key === "ArrowLeft")  keys.left = false;
+  if (e.key === "ArrowRight") keys.right = false;
+});
+
+// smooth continuous motion loop
+function controlLoop() {
+  let moved = false;
+
+  // zoom
+  if (keys.up) {
+    state.scale *= 0.985; // zoom in
+    moved = true;
+  }
+  if (keys.down) {
+    state.scale *= 1.015; // zoom out
+    moved = true;
+  }
+
+  // pan
+  const panSpeed = state.scale * 0.02;
+  if (keys.left)  { state.cx -= panSpeed; moved = true; }
+  if (keys.right) { state.cx += panSpeed; moved = true; }
+
+  if (moved) queueRender();
+  requestAnimationFrame(controlLoop);
+}
+
+controlLoop();
+
 
   // UI wiring
   iterEl.addEventListener("input", () => iterValEl.textContent = iterEl.value);
