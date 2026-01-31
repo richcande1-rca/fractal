@@ -128,13 +128,22 @@ const renderBtn = document.getElementById("renderBtn");
 const resetBtn  = document.getElementById("resetBtn");
 const copyBtn   = document.getElementById("copyBtn");
 
+// ---------------------------
+// Performance tuning
+// ---------------------------
 const PREVIEW_FPS = 12;
 const PREVIEW_QUALITY = 0.45;
 const PREVIEW_ITER_MULT = 0.25;
 const SETTLE_MS = 220;
 
+// Progressive render chunk size (fixed, not exposed)
+const ROWS_PER_FRAME = 14;
+
 let lastPreview = 0;
 let settleTimer = null;
+
+// Render cancellation token
+let renderToken = 0;
 
 const state = {
   cx: -0.5,
@@ -173,138 +182,191 @@ function pixelToComplex(px, py) {
 }
 
 function isInside(cx, cy) {
-  const x = cx - .25, y = cy;
+  // main cardioid
+  const x = cx - 0.25;
+  const y = cy;
   const q = x*x + y*y;
-  if (q*(q+x) <= .25*y*y) return true;
-  const x2 = cx + 1;
-  if (x2*x2 + cy*cy <= .0625) return true;
+  if (q*(q + x) <= 0.25*y*y) return true;
+
+  // period-2 bulb
+  const x2 = cx + 1.0;
+  if (x2*x2 + cy*cy <= 0.0625) return true;
+
   return false;
 }
 
 function color(t) {
-  const a=.5,b=.5;
-  const r=a+b*Math.cos(6.283*(t));
-  const g=a+b*Math.cos(6.283*(t+.33));
-  const b2=a+b*Math.cos(6.283*(t+.67));
-  return [r*255|0,g*255|0,b2*255|0,255];
+  const a = 0.5, b = 0.5;
+  const r = a + b * Math.cos(6.283185307179586 * (t));
+  const g = a + b * Math.cos(6.283185307179586 * (t + 0.33));
+  const b2 = a + b * Math.cos(6.283185307179586 * (t + 0.67));
+  return [ (r*255)|0, (g*255)|0, (b2*255)|0, 255 ];
 }
 
-function renderWith(maxIter) {
-  const w=canvas.width,h=canvas.height;
-  const img=ctx.createImageData(w,h), d=img.data;
+// ---------------------------
+// Progressive, cancelable renderer
+// ---------------------------
+function renderProgressive(maxIter) {
+  const token = ++renderToken;
 
-  const aspect=w/h;
-  const vw=state.scale;
-  const vh=vw/aspect;
+  const w = canvas.width, h = canvas.height;
 
-  const x0=state.cx-vw/2;
-  const y0=state.cy-vh/2;
-  const dx=vw/w, dy=vh/h;
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
 
-  let p=0;
+  const aspect = w / h;
+  const vw = state.scale;
+  const vh = vw / aspect;
 
-  for(let py=0;py<h;py++){
-    const cy=y0+py*dy;
-    for(let px=0;px<w;px++){
-      const cx=x0+px*dx;
+  const x0 = state.cx - vw / 2;
+  const y0 = state.cy - vh / 2;
+  const dx = vw / w;
+  const dy = vh / h;
 
-      if(isInside(cx,cy)){
-        d[p++]=5;d[p++]=6;d[p++]=8;d[p++]=255;
-        continue;
-      }
+  let py = 0;
 
-      let zx=0,zy=0,i=0,ox=0,oy=0;
+  function step() {
+    if (token !== renderToken) return; // canceled
 
-      while(i<maxIter){
-        const zx2=zx*zx-zy*zy+cx;
-        const zy2=2*zx*zy+cy;
-        zx=zx2; zy=zy2;
+    const yEnd = Math.min(h, py + ROWS_PER_FRAME);
 
-        if(zx*zx+zy*zy>4) break;
+    for (; py < yEnd; py++) {
+      const cy = y0 + py * dy;
+      let p = py * w * 4;
 
-        // periodicity check (cheap "inside" detection)
-        if((i&31)===0){
-          if(Math.abs(zx-ox)<1e-12 && Math.abs(zy-oy)<1e-12){
-            i=maxIter; break;
-          }
-          ox=zx; oy=zy;
+      for (let px = 0; px < w; px++) {
+        const cx = x0 + px * dx;
+
+        if (isInside(cx, cy)) {
+          d[p++] = 5; d[p++] = 6; d[p++] = 8; d[p++] = 255;
+          continue;
         }
-        i++;
-      }
 
-      if(i===maxIter){
-        d[p++]=5;d[p++]=6;d[p++]=8;d[p++]=255;
-      } else {
-        const mu=i+1-Math.log(Math.log(Math.sqrt(zx*zx+zy*zy)))/Math.LN2;
-        const c=color(mu/maxIter*1.25);
-        d[p++]=c[0];d[p++]=c[1];d[p++]=c[2];d[p++]=255;
+        let zx = 0, zy = 0, i = 0, ox = 0, oy = 0;
+
+        while (i < maxIter) {
+          const zx2 = zx*zx - zy*zy + cx;
+          const zy2 = 2*zx*zy + cy;
+          zx = zx2; zy = zy2;
+
+          if (zx*zx + zy*zy > 4) break;
+
+          // periodicity check
+          if ((i & 31) === 0) {
+            if (Math.abs(zx - ox) < 1e-12 && Math.abs(zy - oy) < 1e-12) {
+              i = maxIter; break;
+            }
+            ox = zx; oy = zy;
+          }
+          i++;
+        }
+
+        if (i === maxIter) {
+          d[p++] = 5; d[p++] = 6; d[p++] = 8; d[p++] = 255;
+        } else {
+          const mu = i + 1 - Math.log(Math.log(Math.sqrt(zx*zx + zy*zy))) / Math.LN2;
+          const t = (mu / maxIter) * 1.25;
+          const c = color(t);
+          d[p++] = c[0]; d[p++] = c[1]; d[p++] = c[2]; d[p++] = 255;
+        }
       }
+    }
+
+    // Paint partial progress
+    ctx.putImageData(img, 0, 0);
+
+    if (py < h) {
+      requestAnimationFrame(step);
+    } else {
+      updateHUD(maxIter);
     }
   }
 
-  ctx.putImageData(img,0,0);
-  updateHUD(maxIter);
+  requestAnimationFrame(step);
 }
 
-function renderHQ(){
-  state.quality=+qEl.value;
-  resize();
-  renderWith(+iterEl.value);
+// Convenience: cancel any current render immediately
+function cancelRender() {
+  renderToken++;
 }
 
-function preview(){
-  const now=performance.now();
-  if(now-lastPreview<1000/PREVIEW_FPS) return;
-  lastPreview=now;
-
-  state.quality=PREVIEW_QUALITY;
+// ---------------------------
+// Render modes
+// ---------------------------
+function renderHQ() {
+  cancelRender();
+  state.quality = +qEl.value;
   resize();
-  renderWith(Math.max(50, (iterEl.value*PREVIEW_ITER_MULT)|0));
+  renderProgressive(+iterEl.value);
+}
+
+function renderPreviewThrottled() {
+  const now = performance.now();
+  if (now - lastPreview < (1000 / PREVIEW_FPS)) return;
+  lastPreview = now;
+
+  cancelRender();
+
+  state.quality = PREVIEW_QUALITY;
+  resize();
+  const baseIter = +iterEl.value;
+  const previewIter = Math.max(50, (baseIter * PREVIEW_ITER_MULT) | 0);
+
+  renderProgressive(previewIter);
 
   clearTimeout(settleTimer);
-  settleTimer=setTimeout(renderHQ,SETTLE_MS);
+  settleTimer = setTimeout(renderHQ, SETTLE_MS);
 }
 
-function zoomAt(px,py,f){
-  const a=pixelToComplex(px,py);
-  state.scale*=f;
-  const b=pixelToComplex(px,py);
-  state.cx+=a.x-b.x;
-  state.cy+=a.y-b.y;
+// Zoom toward a screen point
+function zoomAt(px, py, factor) {
+  const before = pixelToComplex(px, py);
+  state.scale *= factor;
+  const after = pixelToComplex(px, py);
+  state.cx += (before.x - after.x);
+  state.cy += (before.y - after.y);
 }
 
-let dragging=false, box=false;
-let last={x:0,y:0}, boxStart=null;
+// ---------------------------
+// Mouse / touchpad
+// ---------------------------
+let dragging = false, box = false;
+let last = { x: 0, y: 0 }, boxStart = null;
 
-canvas.addEventListener("mousedown",e=>{
-  dragging=true;
-  const x=e.offsetX*canvas.width/canvas.clientWidth;
-  const y=e.offsetY*canvas.height/canvas.clientHeight;
-  last={x,y};
-  box=e.shiftKey;
-  boxStart=box?{x,y}:null;
+canvas.addEventListener("mousedown", (e) => {
+  dragging = true;
+  const x = e.offsetX * (canvas.width / canvas.clientWidth);
+  const y = e.offsetY * (canvas.height / canvas.clientHeight);
+  last = { x, y };
+  box = e.shiftKey;
+  boxStart = box ? { x, y } : null;
 });
 
-canvas.addEventListener("mousemove",e=>{
-  if(!dragging) return;
-  const x=e.offsetX*canvas.width/canvas.clientWidth;
-  const y=e.offsetY*canvas.height/canvas.clientHeight;
+canvas.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
 
-  const dx=x-last.x, dy=y-last.y;
-  last={x,y};
+  const x = e.offsetX * (canvas.width / canvas.clientWidth);
+  const y = e.offsetY * (canvas.height / canvas.clientHeight);
 
-  if(!box){
-    const vw=state.scale, vh=state.scale/(canvas.width/canvas.height);
-    state.cx-=dx*(vw/canvas.width);
-    state.cy-=dy*(vh/canvas.height);
+  const dx = x - last.x;
+  const dy = y - last.y;
+  last = { x, y };
+
+  if (!box) {
+    const vw = state.scale;
+    const vh = state.scale / (canvas.width / canvas.height);
+    state.cx -= dx * (vw / canvas.width);
+    state.cy -= dy * (vh / canvas.height);
   }
-  preview();
+
+  renderPreviewThrottled();
 });
 
-window.addEventListener("mouseup",()=>{
-  dragging=false;
+window.addEventListener("mouseup", () => {
+  if (!dragging) return;
+  dragging = false;
 
-  // If we were box-zooming, zoom to the rectangle on mouse up
+  // Box zoom on mouse up
   if (box && boxStart) {
     const x1 = boxStart.x, y1 = boxStart.y;
     const x2 = last.x,     y2 = last.y;
@@ -315,13 +377,11 @@ window.addEventListener("mouseup",()=>{
     const selW = Math.max(2, xMax - xMin);
     const selH = Math.max(2, yMax - yMin);
 
-    // center selection
     const cA = pixelToComplex(xMin, yMin);
     const cB = pixelToComplex(xMax, yMax);
     state.cx = (cA.x + cB.x) / 2;
     state.cy = (cA.y + cB.y) / 2;
 
-    // fit selection, preserve aspect
     const w = canvas.width, h = canvas.height;
     const aspect = w / h;
 
@@ -333,14 +393,13 @@ window.addEventListener("mouseup",()=>{
     state.scale = newViewW;
   }
 
-  box=false;
-  boxStart=null;
+  box = false;
+  boxStart = null;
 
   renderHQ();
 });
 
 canvas.addEventListener("click", (e) => {
-  // Ignore click that ends a drag gesture
   if (dragging) return;
 
   const px = e.offsetX * (canvas.width / canvas.clientWidth);
@@ -348,21 +407,26 @@ canvas.addEventListener("click", (e) => {
   const factor = e.shiftKey ? 1.8 : 0.55;
 
   zoomAt(px, py, factor);
-  preview();
+  renderPreviewThrottled();
 });
 
-canvas.addEventListener("wheel",e=>{
+canvas.addEventListener("wheel", (e) => {
   e.preventDefault();
-  const px=e.offsetX*canvas.width/canvas.clientWidth;
-  const py=e.offsetY*canvas.height/canvas.clientHeight;
-  const dy=Math.max(-120,Math.min(120,e.deltaY));
-  zoomAt(px,py,Math.exp(dy*0.0016));
-  preview();
-},{passive:false});
+  const px = e.offsetX * (canvas.width / canvas.clientWidth);
+  const py = e.offsetY * (canvas.height / canvas.clientHeight);
 
-// -------- Keyboard controls (with accelerated ↓ zoom-out) --------
+  const dy = Math.max(-120, Math.min(120, e.deltaY));
+  const zoomFactor = Math.exp(dy * 0.0016);
+
+  zoomAt(px, py, zoomFactor);
+  renderPreviewThrottled();
+}, { passive: false });
+
+// ---------------------------
+// Keyboard controls (accelerated ↓ zoom-out)
+// ---------------------------
 const keys = { up:false, down:false, left:false, right:false };
-let downHold = 0; // frames held for ArrowDown acceleration
+let downHold = 0;
 
 window.addEventListener("keydown", (e) => {
   if (e.key === "ArrowUp")    keys.up = true;
@@ -383,78 +447,77 @@ window.addEventListener("keydown", (e) => {
 
 window.addEventListener("keyup", (e) => {
   if (e.key === "ArrowUp")    keys.up = false;
-  if (e.key === "ArrowDown")  { keys.down = false; downHold = 0; } // reset accel
+  if (e.key === "ArrowDown")  { keys.down = false; downHold = 0; }
   if (e.key === "ArrowLeft")  keys.left = false;
   if (e.key === "ArrowRight") keys.right = false;
 
   clearTimeout(settleTimer);
-  settleTimer=setTimeout(renderHQ,SETTLE_MS);
+  settleTimer = setTimeout(renderHQ, SETTLE_MS);
 });
 
 function controlLoop() {
   let moved = false;
 
-  // Zoom IN (steady)
   if (keys.up) {
     state.scale *= 0.985;
     moved = true;
   }
 
-  // Zoom OUT (accelerates while holding down)
   if (keys.down) {
-    downHold = Math.min(downHold + 1, 120);     // cap so it doesn't go insane
-    const accel = 1 + downHold * 0.003;         // ramps up over time
+    downHold = Math.min(downHold + 1, 120);
+    const accel = 1 + downHold * 0.003;
     state.scale *= (1.015 * accel);
     moved = true;
   }
 
-  // Pan
   const panSpeed = state.scale * 0.02;
   if (keys.left)  { state.cx -= panSpeed; moved = true; }
   if (keys.right) { state.cx += panSpeed; moved = true; }
 
-  if (moved) preview();
+  if (moved) renderPreviewThrottled();
 
   requestAnimationFrame(controlLoop);
 }
 
-// -------- UI wiring --------
+// ---------------------------
+// UI wiring
+// ---------------------------
 function resetView() {
   state.cx = -0.5;
   state.cy = 0.0;
   state.scale = 3.0;
 }
 
-iterEl.oninput=()=>{
-  iterValEl.textContent=iterEl.value;
+iterEl.oninput = () => {
+  iterValEl.textContent = iterEl.value;
   state.maxIter = +iterEl.value;
   updateHUD(state.maxIter);
 };
-iterEl.onchange=renderHQ;
+iterEl.onchange = renderHQ;
 
-qEl.oninput=()=>{
-  qValEl.textContent=(+qEl.value).toFixed(1);
+qEl.oninput = () => {
+  qValEl.textContent = (+qEl.value).toFixed(1);
 };
-qEl.onchange=renderHQ;
+qEl.onchange = renderHQ;
 
-renderBtn.onclick=renderHQ;
+renderBtn.onclick = renderHQ;
 
-resetBtn.onclick=()=>{
+resetBtn.onclick = () => {
   resetView();
-  iterEl.value=350; iterValEl.textContent="350";
-  qEl.value=0.7; qValEl.textContent="0.7";
+  iterEl.value = 350; iterValEl.textContent = "350";
+  qEl.value = 0.7; qValEl.textContent = "0.7";
   downHold = 0;
   renderHQ();
 };
 
-copyBtn.onclick=async()=>{
-  const s=`cx=${state.cx}&cy=${state.cy}&scale=${state.scale}&iter=${iterEl.value}&q=${qEl.value}`;
-  try{
+copyBtn.onclick = async () => {
+  const s = `cx=${state.cx}&cy=${state.cy}&scale=${state.scale}&iter=${iterEl.value}&q=${qEl.value}`;
+  try {
     await navigator.clipboard.writeText(s);
-    hud.textContent="Copied ✔";
-    setTimeout(()=>updateHUD(),700);
-  }catch{
-    prompt("Copy:",s);
+    hud.textContent = "Copied ✔";
+    setTimeout(() => updateHUD(), 700);
+  } catch {
+    prompt("Copy:", s);
   }
 };
 
