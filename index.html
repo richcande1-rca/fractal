@@ -343,4 +343,138 @@ window.addEventListener("mouseup", () => {
 canvas.addEventListener("click", (e) => {
   if (dragging) return;
 
-  const px = e.offsetX * (canvas.width /*
+  const px = e.offsetX * (canvas.width / canvas.clientWidth);
+  const py = e.offsetY * (canvas.height / canvas.clientHeight);
+  const factor = e.shiftKey ? 1.8 : 0.55;
+
+  zoomAt(px, py, factor);
+  renderPreviewThrottled();
+});
+
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const px = e.offsetX * (canvas.width / canvas.clientWidth);
+  const py = e.offsetY * (canvas.height / canvas.clientHeight);
+  const dy = Math.max(-120, Math.min(120, e.deltaY));
+  zoomAt(px, py, Math.exp(dy * 0.0016));
+  renderPreviewThrottled();
+}, { passive: false });
+
+// ---------------------------
+// Keyboard: arrows PAN, Shift+Up/Down zoom
+// ---------------------------
+const keys = { up:false, down:false, left:false, right:false, shift:false };
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Shift") keys.shift = true;
+
+  if (e.key === "ArrowUp")    keys.up = true;
+  if (e.key === "ArrowDown")  keys.down = true;
+  if (e.key === "ArrowLeft")  keys.left = true;
+  if (e.key === "ArrowRight") keys.right = true;
+
+  if (e.key.toLowerCase() === "r") {
+    resetView();
+    renderHQ();
+  }
+
+  if (e.key === " ") {
+    e.preventDefault();
+    renderHQ();
+  }
+});
+
+window.addEventListener("keyup", (e) => {
+  if (e.key === "Shift") keys.shift = false;
+
+  if (e.key === "ArrowUp")    keys.up = false;
+  if (e.key === "ArrowDown")  keys.down = false;
+  if (e.key === "ArrowLeft")  keys.left = false;
+  if (e.key === "ArrowRight") keys.right = false;
+
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(renderHQ, SETTLE_MS);
+});
+
+function controlLoop() {
+  let moved = false;
+
+  const panSpeed = state.scale * 0.02;
+
+  if (keys.shift) {
+    // Shift + Up/Down = zoom
+    if (keys.up)   { state.scale *= 0.985; moved = true; }  // zoom in
+    if (keys.down) { state.scale *= 1.015; moved = true; }  // zoom out
+    // (Left/Right do nothing while shift held, to avoid drifting)
+  } else {
+    // Arrows = pan (including Y axis!)
+    if (keys.left)  { state.cx -= panSpeed; moved = true; }
+    if (keys.right) { state.cx += panSpeed; moved = true; }
+    if (keys.up)    { state.cy -= panSpeed; moved = true; } // up arrow pans up
+    if (keys.down)  { state.cy += panSpeed; moved = true; } // down arrow pans down
+  }
+
+  if (moved) renderPreviewThrottled();
+
+  requestAnimationFrame(controlLoop);
+}
+
+// ---------------------------
+// UI wiring
+// ---------------------------
+function resetView() {
+  state.cx = -0.5;
+  state.cy = 0.0;
+  state.scale = 3.0;
+}
+
+iterEl.oninput = () => {
+  iterValEl.textContent = iterEl.value;
+  state.maxIter = +iterEl.value;
+  updateHUD(state.maxIter);
+};
+iterEl.onchange = renderHQ;
+
+qEl.oninput = () => {
+  qValEl.textContent = (+qEl.value).toFixed(1);
+};
+qEl.onchange = renderHQ;
+
+renderBtn.onclick = renderHQ;
+
+resetBtn.onclick = () => {
+  resetView();
+  iterEl.value = 350; iterValEl.textContent = "350";
+  qEl.value = 0.7; qValEl.textContent = "0.7";
+  renderHQ();
+};
+
+copyBtn.onclick = async () => {
+  const s = `cx=${state.cx}&cy=${state.cy}&scale=${state.scale}&iter=${iterEl.value}&q=${qEl.value}`;
+  try {
+    await navigator.clipboard.writeText(s);
+    hud.textContent = "Copied ✔";
+    setTimeout(() => updateHUD(), 700);
+  } catch {
+    prompt("Copy:", s);
+  }
+};
+
+window.addEventListener("resize", () => {
+  state.quality = +qEl.value;
+  resize();
+  renderHQ();
+});
+
+// Boot
+iterValEl.textContent = iterEl.value;
+qValEl.textContent = (+qEl.value).toFixed(1);
+resize();
+renderHQ();
+controlLoop();
+
+})();
+</script>
+</body>
+</html>
+
