@@ -42,13 +42,13 @@
 <body>
 <div id="wrap">
   <div id="ui">
-    <button id="renderBtn">Render</button>
-    <button id="resetBtn">Reset</button>
+    <button id="renderBtn" title="HQ render (Space)">Render</button>
+    <button id="resetBtn"  title="Reset (R)">Reset</button>
 
     <label class="pill">
       Iterations
-      <input id="iter" type="range" min="50" max="2000" value="600" step="10" />
-      <span id="iterVal">600</span>
+      <input id="iter" type="range" min="50" max="2500" value="700" step="10" />
+      <span id="iterVal">700</span>
     </label>
 
     <label class="pill">
@@ -58,8 +58,8 @@
     </label>
 
     <span class="hint">
-      Drag = pan • Two-finger scroll = zoom • Tap/click = zoom in • <kbd>Shift</kbd>+tap = zoom out •
-      <kbd>+</kbd>/<kbd>-</kbd> zoom • arrows pan • <kbd>R</kbd> reset
+      Drag = pan • Two-finger scroll = zoom • Click = zoom in • <kbd>Shift</kbd>+Click = zoom out •
+      <kbd>↑</kbd>/<kbd>↓</kbd> zoom • <kbd>←</kbd>/<kbd>→</kbd> pan • <kbd>Space</kbd> HQ render • <kbd>R</kbd> reset
     </span>
 
     <div id="hud"></div>
@@ -81,26 +81,36 @@
   const renderBtn = document.getElementById("renderBtn");
   const resetBtn  = document.getElementById("resetBtn");
 
+  // View state
   const state = {
     cx: -0.5,
     cy: 0.0,
-    scale: 3.0,
+    scale: 3.0,        // width of view in complex units
     maxIter: +iterEl.value,
     quality: +qEl.value
   };
 
-  // Pan/drag
-  let dragging = false;
-  let last = { x: 0, y: 0 };
+  // ---------------------------
+  // Performance tuning
+  // ---------------------------
+  const PREVIEW_FPS = 12;         // cap preview redraw rate while moving
+  const PREVIEW_QUALITY = 0.55;   // lower render resolution while moving
+  const PREVIEW_ITER_MULT = 0.40; // fewer iterations while moving
+  const SETTLE_MS = 220;          // after motion stops, do a HQ render
 
-  // Debounced render
+  let lastPreview = 0;
+  let settleTimer = null;
+
+  // ---------------------------
+  // Render scheduling
+  // ---------------------------
   let renderQueued = false;
   function queueRender() {
     if (renderQueued) return;
     renderQueued = true;
     requestAnimationFrame(() => {
       renderQueued = false;
-      render();
+      renderHQ();
     });
   }
 
@@ -112,10 +122,14 @@
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
-      queueRender();
     }
   }
-  window.addEventListener("resize", resize);
+
+  window.addEventListener("resize", () => {
+    state.quality = +qEl.value;
+    resize();
+    queueRender();
+  });
 
   function updateHUD() {
     const digits = (v) => (Math.abs(v) < 1e-3 ? v.toExponential(3) : v.toFixed(6));
@@ -129,6 +143,7 @@
     const aspect = w / h;
     const viewW = state.scale;
     const viewH = state.scale / aspect;
+
     const x = state.cx + (px / w - 0.5) * viewW;
     const y = state.cy + (py / h - 0.5) * viewH;
     return { x, y };
@@ -136,21 +151,27 @@
 
   function smoothIter(i, zx, zy) {
     const mag = Math.sqrt(zx*zx + zy*zy);
+    // Guard against weird log edge cases (rare)
+    if (mag <= 0) return i;
     return i + 1 - Math.log(Math.log(mag)) / Math.LN2;
   }
 
+  // Cosine palette (smooth)
   function colorFromT(t) {
     const a = 0.5, b = 0.5;
     const d1 = 0.00, d2 = 0.33, d3 = 0.67;
     const r = a + b * Math.cos(2*Math.PI*(t + d1));
     const g = a + b * Math.cos(2*Math.PI*(t + d2));
     const bb = a + b * Math.cos(2*Math.PI*(t + d3));
-    return [ (r*255)|0, (g*255)|0, (bb*255)|0, 255 ];
+    return [
+      Math.max(0, Math.min(255, (r * 255) | 0)),
+      Math.max(0, Math.min(255, (g * 255) | 0)),
+      Math.max(0, Math.min(255, (bb * 255) | 0)),
+      255
+    ];
   }
 
-  function render() {
-    state.maxIter = +iterEl.value;
-
+  function renderWith(maxIter) {
     const w = canvas.width, h = canvas.height;
     const img = ctx.createImageData(w, h);
     const data = img.data;
@@ -164,8 +185,6 @@
     const dx = viewW / w;
     const dy = viewH / h;
 
-    const maxIter = state.maxIter;
-
     let p = 0;
     for (let py = 0; py < h; py++) {
       const cy = y0 + py * dy;
@@ -173,10 +192,12 @@
         const cx = x0 + px * dx;
 
         let zx = 0, zy = 0, i = 0;
+
         while (i < maxIter) {
           const zx2 = zx*zx - zy*zy + cx;
           const zy2 = 2*zx*zy + cy;
           zx = zx2; zy = zy2;
+
           if (zx*zx + zy*zy > 4) break;
           i++;
         }
@@ -193,21 +214,53 @@
     }
 
     ctx.putImageData(img, 0, 0);
+    state.maxIter = maxIter;
     updateHUD();
   }
 
-  // Zoom helper (zoom toward a screen point)
+  function renderHQ() {
+    state.quality = +qEl.value;
+    resize();
+    const baseIter = +iterEl.value;
+    renderWith(baseIter);
+  }
+
+  function scheduleHQRenderSoon() {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      renderHQ();
+    }, SETTLE_MS);
+  }
+
+  function renderPreviewThrottled() {
+    const now = performance.now();
+    if (now - lastPreview < (1000 / PREVIEW_FPS)) return;
+    lastPreview = now;
+
+    const savedQuality = state.quality;
+
+    state.quality = PREVIEW_QUALITY;
+    resize();
+
+    const baseIter = +iterEl.value;
+    const previewIter = Math.max(50, Math.floor(baseIter * PREVIEW_ITER_MULT));
+    renderWith(previewIter);
+
+    // Don't restore buffer size every preview frame; let HQ render restore it after settle
+    state.quality = savedQuality;
+    scheduleHQRenderSoon();
+  }
+
+  // Zoom toward a screen point
   function zoomAt(px, py, factor) {
     const before = pixelToComplex(px, py);
     state.scale *= factor;
     const after = pixelToComplex(px, py);
-    // Adjust center so the point under cursor stays fixed
     state.cx += (before.x - after.x);
     state.cy += (before.y - after.y);
-    queueRender();
   }
 
-  // Pan helper (delta in pixels)
+  // Pan by pixel delta
   function panByPixels(dxPx, dyPx) {
     const w = canvas.width, h = canvas.height;
     const aspect = w / h;
@@ -215,129 +268,153 @@
     const viewH = state.scale / aspect;
     state.cx -= dxPx * (viewW / w);
     state.cy -= dyPx * (viewH / h);
-    queueRender();
   }
 
-  // ---- Touchpad / Mouse events ----
+  // ---------------------------
+  // Touchpad / Mouse
+  // ---------------------------
+  let dragging = false;
+  let last = { x: 0, y: 0 };
+
   canvas.addEventListener("mousedown", (e) => {
     dragging = true;
     last.x = e.offsetX * (canvas.width / canvas.clientWidth);
     last.y = e.offsetY * (canvas.height / canvas.clientHeight);
   });
 
-  window.addEventListener("mouseup", () => dragging = false);
+  window.addEventListener("mouseup", () => {
+    if (dragging) scheduleHQRenderSoon();
+    dragging = false;
+  });
 
   canvas.addEventListener("mousemove", (e) => {
     if (!dragging) return;
+
     const x = e.offsetX * (canvas.width / canvas.clientWidth);
     const y = e.offsetY * (canvas.height / canvas.clientHeight);
     const dx = x - last.x;
     const dy = y - last.y;
     last.x = x; last.y = y;
+
     panByPixels(dx, dy);
+    renderPreviewThrottled();
   });
 
-  // Click/tap zoom
+  // Click zoom (tap on touchpad counts as click)
   canvas.addEventListener("click", (e) => {
-    // If you were dragging, don't also zoom
+    // If you were dragging, ignore click zoom
     if (dragging) return;
+
     const px = e.offsetX * (canvas.width / canvas.clientWidth);
     const py = e.offsetY * (canvas.height / canvas.clientHeight);
-    const factor = e.shiftKey ? 1.8 : 0.55; // out vs in
+    const factor = e.shiftKey ? 1.8 : 0.55;
+
     zoomAt(px, py, factor);
+    renderPreviewThrottled();
   });
 
-  // Two-finger scroll usually arrives as wheel events on Chromebooks
+  // Two-finger scroll typically comes in as wheel events
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const px = e.offsetX * (canvas.width / canvas.clientWidth);
     const py = e.offsetY * (canvas.height / canvas.clientHeight);
-    // Trackpad gives small deltas; map to a smooth exponential zoom
-    const zoom = Math.exp(e.deltaY * 0.0015);
-    zoomAt(px, py, zoom);
+
+    // Smooth exponential mapping
+    const zoomFactor = Math.exp(e.deltaY * 0.0015);
+    zoomAt(px, py, zoomFactor);
+
+    renderPreviewThrottled();
   }, { passive: false });
 
-// ---- Keyboard controls (smooth) ----
-const keys = {
-  up: false,
-  down: false,
-  left: false,
-  right: false
-};
+  // ---------------------------
+  // Keyboard: smooth + preview/HQ settle
+  // ---------------------------
+  const keys = { up:false, down:false, left:false, right:false };
 
-window.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowUp")    keys.up = true;
-  if (e.key === "ArrowDown")  keys.down = true;
-  if (e.key === "ArrowLeft")  keys.left = true;
-  if (e.key === "ArrowRight") keys.right = true;
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp")    keys.up = true;
+    if (e.key === "ArrowDown")  keys.down = true;
+    if (e.key === "ArrowLeft")  keys.left = true;
+    if (e.key === "ArrowRight") keys.right = true;
 
-  if (e.key.toLowerCase() === "r") {
-    state.cx = -0.5;
-    state.cy = 0;
-    state.scale = 3.0;
-    queueRender();
+    if (e.key.toLowerCase() === "r") {
+      resetView();
+      renderHQ();
+    }
+
+    if (e.key === " ") {
+      e.preventDefault();
+      renderHQ();
+    }
+  });
+
+  window.addEventListener("keyup", (e) => {
+    if (e.key === "ArrowUp")    keys.up = false;
+    if (e.key === "ArrowDown")  keys.down = false;
+    if (e.key === "ArrowLeft")  keys.left = false;
+    if (e.key === "ArrowRight") keys.right = false;
+
+    scheduleHQRenderSoon();
+  });
+
+  function controlLoop() {
+    let moved = false;
+
+    // Zoom (hold for continuous)
+    if (keys.up)   { state.scale *= 0.985; moved = true; }
+    if (keys.down) { state.scale *= 1.015; moved = true; }
+
+    // Pan (left/right only, since up/down = zoom)
+    const panSpeed = state.scale * 0.02;
+    if (keys.left)  { state.cx -= panSpeed; moved = true; }
+    if (keys.right) { state.cx += panSpeed; moved = true; }
+
+    if (moved) renderPreviewThrottled();
+
+    requestAnimationFrame(controlLoop);
   }
-});
 
-window.addEventListener("keyup", (e) => {
-  if (e.key === "ArrowUp")    keys.up = false;
-  if (e.key === "ArrowDown")  keys.down = false;
-  if (e.key === "ArrowLeft")  keys.left = false;
-  if (e.key === "ArrowRight") keys.right = false;
-});
-
-// smooth continuous motion loop
-function controlLoop() {
-  let moved = false;
-
-  // zoom
-  if (keys.up) {
-    state.scale *= 0.985; // zoom in
-    moved = true;
-  }
-  if (keys.down) {
-    state.scale *= 1.015; // zoom out
-    moved = true;
-  }
-
-  // pan
-  const panSpeed = state.scale * 0.02;
-  if (keys.left)  { state.cx -= panSpeed; moved = true; }
-  if (keys.right) { state.cx += panSpeed; moved = true; }
-
-  if (moved) queueRender();
-  requestAnimationFrame(controlLoop);
-}
-
-controlLoop();
-
-
+  // ---------------------------
   // UI wiring
-  iterEl.addEventListener("input", () => iterValEl.textContent = iterEl.value);
-  iterEl.addEventListener("change", queueRender);
+  // ---------------------------
+  function resetView() {
+    state.cx = -0.5;
+    state.cy = 0.0;
+    state.scale = 3.0;
+  }
+
+  iterEl.addEventListener("input", () => {
+    iterValEl.textContent = iterEl.value;
+  });
+  iterEl.addEventListener("change", () => {
+    renderHQ();
+  });
 
   qEl.addEventListener("input", () => {
     qValEl.textContent = (+qEl.value).toFixed(1);
     state.quality = +qEl.value;
     resize();
+    renderHQ();
   });
 
-  renderBtn.addEventListener("click", render);
+  renderBtn.addEventListener("click", () => renderHQ());
 
   resetBtn.addEventListener("click", () => {
-    state.cx = -0.5; state.cy = 0; state.scale = 3.0;
-    iterEl.value = 600; iterValEl.textContent = "600";
-    qEl.value = 1.0; qValEl.textContent = "1.0";
-    state.maxIter = 600; state.quality = 1.0;
+    resetView();
+    iterEl.value = 700; iterValEl.textContent = "700";
+    qEl.value = 1.0;    qValEl.textContent = "1.0";
+    state.quality = 1.0;
     resize();
-    render();
+    renderHQ();
   });
 
-  // boot
+  // Boot
   iterValEl.textContent = iterEl.value;
   qValEl.textContent = (+qEl.value).toFixed(1);
+  state.quality = +qEl.value;
   resize();
-  render();
+  renderHQ();
+  controlLoop();
 })();
 </script>
 </body>
