@@ -47,14 +47,14 @@
 
     <label class="pill">
       Iterations
-      <input id="iter" type="range" min="50" max="2500" value="700" step="10" />
-      <span id="iterVal">700</span>
+      <input id="iter" type="range" min="50" max="2500" value="350" step="10" />
+      <span id="iterVal">350</span>
     </label>
 
     <label class="pill">
       Quality
-      <input id="quality" type="range" min="0.5" max="1.5" value="1.0" step="0.1" />
-      <span id="qualityVal">1.0</span>
+      <input id="quality" type="range" min="0.5" max="1.5" value="0.7" step="0.1" />
+      <span id="qualityVal">0.7</span>
     </label>
 
     <span class="hint">
@@ -91,28 +91,15 @@
   };
 
   // ---------------------------
-  // Performance tuning
+  // Performance tuning (Chromebook-friendly)
   // ---------------------------
   const PREVIEW_FPS = 12;         // cap preview redraw rate while moving
-  const PREVIEW_QUALITY = 0.55;   // lower render resolution while moving
-  const PREVIEW_ITER_MULT = 0.40; // fewer iterations while moving
+  const PREVIEW_QUALITY = 0.45;   // lower render resolution while moving
+  const PREVIEW_ITER_MULT = 0.25; // fewer iterations while moving
   const SETTLE_MS = 220;          // after motion stops, do a HQ render
 
   let lastPreview = 0;
   let settleTimer = null;
-
-  // ---------------------------
-  // Render scheduling
-  // ---------------------------
-  let renderQueued = false;
-  function queueRender() {
-    if (renderQueued) return;
-    renderQueued = true;
-    requestAnimationFrame(() => {
-      renderQueued = false;
-      renderHQ();
-    });
-  }
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
@@ -128,7 +115,7 @@
   window.addEventListener("resize", () => {
     state.quality = +qEl.value;
     resize();
-    queueRender();
+    renderHQ();
   });
 
   function updateHUD() {
@@ -151,7 +138,6 @@
 
   function smoothIter(i, zx, zy) {
     const mag = Math.sqrt(zx*zx + zy*zy);
-    // Guard against weird log edge cases (rare)
     if (mag <= 0) return i;
     return i + 1 - Math.log(Math.log(mag)) / Math.LN2;
   }
@@ -169,6 +155,21 @@
       Math.max(0, Math.min(255, (bb * 255) | 0)),
       255
     ];
+  }
+
+  // Fast inside checks for Mandelbrot (BIG speedup)
+  function isDefinitelyInside(cx, cy) {
+    // Main cardioid test
+    const x = cx - 0.25;
+    const y = cy;
+    const q = x*x + y*y;
+    if (q * (q + x) <= 0.25 * y*y) return true;
+
+    // Period-2 bulb test (center -1, radius 1/4)
+    const x2 = cx + 1.0;
+    if (x2*x2 + cy*cy <= 0.0625) return true; // (1/4)^2
+
+    return false;
   }
 
   function renderWith(maxIter) {
@@ -191,8 +192,14 @@
       for (let px = 0; px < w; px++) {
         const cx = x0 + px * dx;
 
-        let zx = 0, zy = 0, i = 0;
+        // Inside shortcuts (huge speed win)
+        if (isDefinitelyInside(cx, cy)) {
+          data[p++] = 5; data[p++] = 6; data[p++] = 8; data[p++] = 255;
+          continue;
+        }
 
+        // Escape-time iteration
+        let zx = 0, zy = 0, i = 0;
         while (i < maxIter) {
           const zx2 = zx*zx - zy*zy + cx;
           const zy2 = 2*zx*zy + cy;
@@ -237,17 +244,14 @@
     if (now - lastPreview < (1000 / PREVIEW_FPS)) return;
     lastPreview = now;
 
-    const savedQuality = state.quality;
-
+    // Preview settings
     state.quality = PREVIEW_QUALITY;
     resize();
-
     const baseIter = +iterEl.value;
     const previewIter = Math.max(50, Math.floor(baseIter * PREVIEW_ITER_MULT));
     renderWith(previewIter);
 
-    // Don't restore buffer size every preview frame; let HQ render restore it after settle
-    state.quality = savedQuality;
+    // HQ render will restore quality after you stop
     scheduleHQRenderSoon();
   }
 
@@ -300,9 +304,7 @@
     renderPreviewThrottled();
   });
 
-  // Click zoom (tap on touchpad counts as click)
   canvas.addEventListener("click", (e) => {
-    // If you were dragging, ignore click zoom
     if (dragging) return;
 
     const px = e.offsetX * (canvas.width / canvas.clientWidth);
@@ -313,13 +315,11 @@
     renderPreviewThrottled();
   });
 
-  // Two-finger scroll typically comes in as wheel events
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const px = e.offsetX * (canvas.width / canvas.clientWidth);
     const py = e.offsetY * (canvas.height / canvas.clientHeight);
 
-    // Smooth exponential mapping
     const zoomFactor = Math.exp(e.deltaY * 0.0015);
     zoomAt(px, py, zoomFactor);
 
@@ -364,7 +364,7 @@
     if (keys.up)   { state.scale *= 0.985; moved = true; }
     if (keys.down) { state.scale *= 1.015; moved = true; }
 
-    // Pan (left/right only, since up/down = zoom)
+    // Pan (left/right only)
     const panSpeed = state.scale * 0.02;
     if (keys.left)  { state.cx -= panSpeed; moved = true; }
     if (keys.right) { state.cx += panSpeed; moved = true; }
@@ -401,9 +401,9 @@
 
   resetBtn.addEventListener("click", () => {
     resetView();
-    iterEl.value = 700; iterValEl.textContent = "700";
-    qEl.value = 1.0;    qValEl.textContent = "1.0";
-    state.quality = 1.0;
+    iterEl.value = 350; iterValEl.textContent = "350";
+    qEl.value = 0.7;    qValEl.textContent = "0.7";
+    state.quality = 0.7;
     resize();
     renderHQ();
   });
